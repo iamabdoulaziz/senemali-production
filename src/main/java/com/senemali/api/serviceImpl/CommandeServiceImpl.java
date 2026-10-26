@@ -170,7 +170,7 @@ public class CommandeServiceImpl implements CommandeService {
     @Override
     @Transactional
     public CommandeResponse confirmer(Long id) {
-        Commandes commande = commandeRepository.findById(id)
+        Commandes commande = commandeRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Commande non trouvée"));
         verifierVendeurCommandeEnCours(commande, "confirmer", "confirmée");
         commande.setStatus(StatutCommandeEnum.CONFIRMEE);
@@ -180,9 +180,10 @@ public class CommandeServiceImpl implements CommandeService {
     @Override
     @Transactional
     public CommandeResponse refuser(Long id) {
-        Commandes commande = commandeRepository.findById(id)
+        Commandes commande = commandeRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Commande non trouvée"));
         verifierVendeurCommandeEnCours(commande, "refuser", "refusée");
+        restaurerStock(commande);
         commande.setStatus(StatutCommandeEnum.REFUSEE);
         return mapper.toResponse(commandeRepository.save(commande));
     }
@@ -224,22 +225,26 @@ public class CommandeServiceImpl implements CommandeService {
             throw new IllegalArgumentException("Ce statut ne peut pas être défini via cet endpoint");
         }
         if (statut == StatutCommandeEnum.ANNULEE) {
-            for (DetailCommandes detail : commande.getDetailCommandes()) {
-                if (detail.getProduit() != null) {
-                    ProduitAgricoles produit = produitRepository
-                            .findByIdForUpdate(detail.getProduit().getIdProduit())
-                            .orElseThrow(() -> new ResourceNotFoundException("Produit non trouvé"));
-                    produit.setQuantite(Math.addExact(produit.getQuantite(), detail.getQuantite()));
-                } else if (detail.getIntrant() != null) {
-                    Intrants intrant = intrantRepository
-                            .findByIdForUpdate(detail.getIntrant().getIdIntrant())
-                            .orElseThrow(() -> new ResourceNotFoundException("Intrant non trouvé"));
-                    intrant.setQuantite(Math.addExact(intrant.getQuantite(), detail.getQuantite()));
-                }
-            }
+            restaurerStock(commande);
         }
         commande.setStatus(statut);
         return mapper.toResponse(commandeRepository.save(commande));
+    }
+
+    private void restaurerStock(Commandes commande) {
+        for (DetailCommandes detail : commande.getDetailCommandes()) {
+            if (detail.getProduit() != null) {
+                ProduitAgricoles produit = produitRepository
+                        .findByIdForUpdate(detail.getProduit().getIdProduit())
+                        .orElseThrow(() -> new ResourceNotFoundException("Produit non trouvé"));
+                produit.setQuantite(Math.addExact(produit.getQuantite(), detail.getQuantite()));
+            } else if (detail.getIntrant() != null) {
+                Intrants intrant = intrantRepository
+                        .findByIdForUpdate(detail.getIntrant().getIdIntrant())
+                        .orElseThrow(() -> new ResourceNotFoundException("Intrant non trouvé"));
+                intrant.setQuantite(Math.addExact(intrant.getQuantite(), detail.getQuantite()));
+            }
+        }
     }
 
     private boolean isSellerForCommande(Commandes commande, Utilisateurs utilisateur) {

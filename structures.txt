@@ -209,6 +209,44 @@ security/JwtUtil.java
     jwt.secret et jwt.expiration. Un JWT est signe, mais son contenu n'est
     pas chiffre : ne pas y placer de mot de passe ou de secret.
 
+Fonctionnement du JWT
+    1. L'utilisateur envoie POST /api/auth/login avec son identifiant et son
+       mot de passe. AuthServiceImpl retrouve son compte, compare le mot de
+       passe avec BCrypt et refuse une connexion si le compte est desactive
+       ou si un fournisseur n'a pas ete valide.
+    2. Apres authentification, JwtUtil cree un token signe avec HS256. Le JWT
+       comprend un en-tete, des donnees (email comme sujet, role, dates de
+       creation et d'expiration) et une signature calculee avec jwt.secret.
+       La duree jwt.expiration configuree actuellement est de 86 400 000 ms,
+       soit 24 heures.
+    3. Le client envoie ce token pour les routes protegees dans
+       Authorization: Bearer <token>. Le filtre JwtAuthFilter verifie la
+       signature et l'expiration, extrait l'email et recharge l'utilisateur
+       depuis la base. Il verifie aussi que le compte est encore actif, puis
+       etablit son identite et ses autorites pour cette requete.
+    4. SecurityConfig exige une authentification pour toute route qui n'est
+       pas dans la liste publique. Les annotations @PreAuthorize des
+       controleurs ajoutent les controles de role et de propriete de donnees.
+       Une authentification manquante ou invalide donne HTTP 401 ; un compte
+       authentifie mais non autorise donne HTTP 403.
+
+    Un JWT signe garantit que son contenu n'a pas ete modifie, mais ne le
+    rend pas secret : toute personne qui obtient le token peut lire ses
+    donnees. Ne pas y mettre de mot de passe ou de donnee confidentielle. Le
+    role contenu dans le token n'est pas la seule source d'autorisation :
+    les autorites sont rechargees depuis le compte en base a chaque requete.
+    L'application etant stateless, elle ne conserve pas de session ni de
+    liste de tokens revoques ; la deconnexion cote client consiste a effacer
+    le token. Le renouvellement JWT n'est pas implemente actuellement ; la
+    propriete jwt.refresh-expiration seule ne constitue pas un endpoint de
+    renouvellement.
+
+    La propriete jwt.secret est une cle de signature sensible : en production,
+    elle doit etre forte, configuree hors du depot (par exemple par variable
+    d'environnement ou gestionnaire de secrets), et ne jamais etre communiquee
+    ni inscrite dans les logs. Transmettre les tokens uniquement via HTTPS
+    et les conserver dans un stockage adapte a la plateforme cliente.
+
 security/UserDetailsServiceImpl.java
     Recherche l'utilisateur par email et fournit a Spring Security son hash
     de mot de passe et son autorite ROLE_<role>. Un compte inactif est
@@ -232,6 +270,17 @@ serviceImpl/AuthServiceImpl.java
     verifie que le compte est actif et que le fournisseur est valide, puis
     demande a JwtUtil de creer le token. A l'inscription, encode le mot de
     passe avant de l'enregistrer. La creation publique d'un ADMIN est refusee.
+
+Protection des mots de passe en base
+    Les mots de passe ne sont pas chiffres de maniere reversible : ils sont
+    haches avec BCrypt avant leur enregistrement dans la colonne mot_de_passe
+    de la table utilisateurs. SecurityConfig configure BCrypt avec un facteur
+    de cout de 12. BCrypt genere un sel aleatoire et l'inclut dans la valeur
+    hachee ; deux encodages d'un meme mot de passe peuvent donc etre differents.
+    Lors de la connexion, AuthServiceImpl utilise passwordEncoder.matches()
+    pour verifier le mot de passe saisi a partir du hash stocke. Le mot de
+    passe original ne peut pas etre recupere depuis ce hash ; en cas d'oubli,
+    il faut mettre en place une procedure de reinitialisation.
 
 config/DataInitializer.java
     Initialise le compte administrateur de bootstrap selon la configuration
