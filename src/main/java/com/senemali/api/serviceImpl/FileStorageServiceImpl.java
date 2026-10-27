@@ -10,7 +10,12 @@ import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.*;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -30,11 +35,27 @@ import java.util.UUID;
 @Slf4j
 public class FileStorageServiceImpl implements FileStorageService {
 
+    @Value("${app.storage.provider:local}")
+    private String storageProvider;
+
     @Value("${app.upload.dir:uploads}")
     private String uploadDir;
 
     @Value("${app.base-url:http://localhost:8080}")
     private String baseUrl;
+
+    @Value("${supabase.url:}")
+    private String supabaseUrl;
+
+    @Value("${supabase.service-role-key:}")
+    private String supabaseServiceRoleKey;
+
+    @Value("${supabase.bucket:senemali-uploads}")
+    private String supabaseBucket;
+
+    private final HttpClient httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10))
+            .build();
 
     private static final List<String> ALLOWED_IMAGE_EXTENSIONS = Arrays.asList(
             "jpg", "jpeg", "png", "gif", "webp", "svg"
@@ -76,6 +97,14 @@ public class FileStorageServiceImpl implements FileStorageService {
         // Générer un nom unique pour éviter les conflits
         String newFileName = UUID.randomUUID() + "." + extension;
 
+        if ("supabase".equalsIgnoreCase(storageProvider)) {
+            uploadToSupabase(file, subFolder, newFileName);
+            return newFileName;
+        }
+        if (!"local".equalsIgnoreCase(storageProvider)) {
+            throw new IllegalStateException("Fournisseur de stockage inconnu: " + storageProvider);
+        }
+
         try {
             Path targetDir = Paths.get(uploadDir, subFolder).toAbsolutePath().normalize();
             Files.createDirectories(targetDir);
@@ -94,6 +123,14 @@ public class FileStorageServiceImpl implements FileStorageService {
     @Override
     public void deleteFile(String fileName, String subFolder) {
         if (fileName == null || fileName.isBlank()) return;
+        validateStoragePath(fileName, subFolder);
+        if ("supabase".equalsIgnoreCase(storageProvider)) {
+            deleteFromSupabase(fileName, subFolder);
+            return;
+        }
+        if (!"local".equalsIgnoreCase(storageProvider)) {
+            throw new IllegalStateException("Fournisseur de stockage inconnu: " + storageProvider);
+        }
         try {
             Path filePath = Paths.get(uploadDir, subFolder, fileName).toAbsolutePath().normalize();
             Files.deleteIfExists(filePath);
@@ -106,7 +143,119 @@ public class FileStorageServiceImpl implements FileStorageService {
     @Override
     public String getFileUrl(String fileName, String subFolder) {
         if (fileName == null || fileName.isBlank()) return null;
+        if ("supabase".equalsIgnoreCase(storageProvider)) {
+            requireSupabaseConfiguration();
+            return supabaseUrl.replaceAll("/+$", "") + "/storage/v1/object/public/"
+                    + supabaseBucket + "/" + subFolder + "/" + fileName;
+        }
         return baseUrl + "/uploads/" + subFolder + "/" + fileName;
+    }
+
+    private void uploadToSupabase(MultipartFile file, String subFolder, String fileName) {
+        requireSupabaseConfiguration();
+        URI uri = supabaseObjectUri(subFolder + "/" + fileName);
+        HttpRequest request = HttpRequest.newBuilder(uri)
+                .timeout(Duration.ofSeconds(120))
+                .header("Authorization", "Bearer " + supabaseServiceRoleKey)
+                .header("apikey", supabaseServiceRoleKey)
+                .header("Content-Type", contentTypeFor(fileName))
+                .header("x-upsert", "true")
+                .POST(HttpRequest.BodyPublishers.ofByteArray(readFileBytes(file)))
+                .build();
+        sendSupabaseRequest(request, "upload");
+        log.info("Fichier envoyé vers Supabase Storage : {}/{}", subFolder, fileName);
+    }
+
+    private void deleteFromSupabase(String fileName, String subFolder) {
+        requireSupabaseConfiguration();
+        String objectPath = subFolder + "/" + fileName;
+        String body = "{\"prefixes\":[\"" + objectPath + "\"]}";
+        HttpRequest request = HttpRequest.newBuilder(supabaseObjectUri(""))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", "Bearer " + supabaseServiceRoleKey)
+                .header("apikey", supabaseServiceRoleKey)
+                .header("Content-Type", "application/json")
+                .method("DELETE", HttpRequest.BodyPublishers.ofString(body))
+                .build();
+        sendSupabaseRequest(request, "suppression");
+        log.info("Fichier supprimé de Supabase Storage : {}", objectPath);
+    }
+
+    private void sendSupabaseRequest(HttpRequest request, String operation) {
+        try {
+            HttpResponse<Void> response = httpClient.send(request, HttpResponse.BodyHandlers.discarding());
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                log.error("Supabase Storage a refusé l'opération {} (HTTP {})",
+                        operation, response.statusCode());
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_GATEWAY,
+                        "Échec de l'opération de stockage distant"
+                );
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_GATEWAY,
+                    "Opération de stockage distant interrompue",
+                    e
+            );
+        } catch (IOException e) {
+            log.error("Impossible de joindre Supabase Storage pour l'opération {}", operation, e);
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_GATEWAY,
+                    "Service de stockage distant indisponible",
+                    e
+            );
+        }
+    }
+
+    private byte[] readFileBytes(MultipartFile file) {
+        try {
+            return file.getBytes();
+        } catch (IOException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Impossible de lire le fichier envoyé", e);
+        }
+    }
+
+    private URI supabaseObjectUri(String objectPath) {
+        String base = supabaseUrl.replaceAll("/+$", "");
+        String path = objectPath.isEmpty() ? "" : "/" + objectPath;
+        return URI.create(base + "/storage/v1/object/" + supabaseBucket + path);
+    }
+
+    private String contentTypeFor(String fileName) {
+        String extension = getExtension(fileName).toLowerCase();
+        return switch (extension) {
+            case "jpg", "jpeg" -> "image/jpeg";
+            case "png" -> "image/png";
+            case "gif" -> "image/gif";
+            case "webp" -> "image/webp";
+            case "svg" -> "image/svg+xml";
+            case "mp4" -> "video/mp4";
+            case "webm" -> "video/webm";
+            case "mov" -> "video/quicktime";
+            default -> "application/octet-stream";
+        };
+    }
+
+    private void requireSupabaseConfiguration() {
+        if (supabaseUrl == null || supabaseUrl.isBlank()
+                || supabaseServiceRoleKey == null || supabaseServiceRoleKey.isBlank()
+                || supabaseBucket == null || supabaseBucket.isBlank()) {
+            throw new IllegalStateException(
+                    "SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY et SUPABASE_BUCKET doivent être configurés"
+            );
+        }
+    }
+
+    private void validateStoragePath(String fileName, String subFolder) {
+        if (fileName.contains("/") || fileName.contains("\\") || fileName.equals(".") || fileName.equals("..")) {
+            throw new IllegalArgumentException("Nom de fichier invalide");
+        }
+        if (subFolder == null || !subFolder.matches(
+                "profils|produits|intrants|cultures|tutoriels|services|conseils|financements")) {
+            throw new IllegalArgumentException("Dossier de stockage invalide");
+        }
     }
 
     private String getExtension(String filename) {

@@ -85,13 +85,19 @@ security/
     Composants de securite et gestion des tokens JWT.
 
 controller/FileUploadController.java, serviceImpl/FileStorageServiceImpl.java
-    Upload de fichiers via multipart/form-data dans le dossier local configure
-    par app.upload.dir. Les images sont rangees par dossier (profils,
+    Upload de fichiers via multipart/form-data. En mode local, le stockage est
+    fait dans le dossier configure par app.upload.dir. En mode Supabase, les
+    fichiers sont envoyes dans le bucket configure par SUPABASE_BUCKET. Les
+    images sont rangees par dossier (profils,
     produits, intrants, tutoriels, services, conseils, financements) et
     limitees a 10 MB. Le dossier tutoriels accepte aussi les videos MP4,
     WEBM et MOV jusqu'a 100 MB. Les fichiers ont un nom UUID ; l'URL publique
-    /uploads/{dossier}/{nom} pointe vers le fichier sans stocker son contenu
-    dans MySQL. Les chemins d'URL sont servis par config/WebMvcConfig.java.
+    pointe vers le fichier sans stocker son contenu dans MySQL. Pour utiliser
+    Supabase, definir APP_STORAGE_PROVIDER=supabase ainsi que SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE_KEY et SUPABASE_BUCKET dans l'environnement du
+    backend. La cle service_role est secrete et ne doit jamais etre exposee au
+    client web/mobile ni committee. En mode local, les chemins /uploads/
+    sont servis par config/WebMvcConfig.java.
 
 Quantites de stock
     ProduitAgricoleResponse expose deja quantite pour le stock d'un produit.
