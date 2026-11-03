@@ -48,7 +48,7 @@ import org.springframework.context.annotation.Configuration;
         ),
         servers = {
                 @Server(url = "http://localhost:8080", description = "Serveur de développement local"),
-                @Server(url = "https://api.senemali.ml", description = "Serveur de production")
+                @Server(url = "https://senemali-production.onrender.com/", description = "Serveur de production")
         }
 )
 @SecurityScheme(
